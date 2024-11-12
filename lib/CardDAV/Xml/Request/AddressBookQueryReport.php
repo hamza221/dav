@@ -74,6 +74,16 @@ class AddressBookQueryReport implements XmlDeserializable
      */
     public $limit;
 
+    
+    /**
+     * The offset of results the client wants.
+     *
+     * null means it wasn't specified, which in most cases means 'from the start'.
+     *
+     * @var int|null
+     */
+    public $offset;
+
     /**
      * Either 'anyof' or 'allof'.
      *
@@ -129,6 +139,7 @@ class AddressBookQueryReport implements XmlDeserializable
             'properties' => [],
             'test' => 'anyof',
             'limit' => null,
+            'offset' => null,
         ];
 
         if (!is_array($elems)) {
@@ -165,6 +176,13 @@ class AddressBookQueryReport implements XmlDeserializable
                     foreach ($elem['value'] as $child) {
                         if ($child['name'] === '{'.Plugin::NS_CARDDAV.'}nresults') {
                             $newProps['limit'] = (int) $child['value'];
+                        }
+                    }
+                    break;
+                case '{'.Plugin::NS_CARDDAV.'}offset':
+                    foreach ($elem['value'] as $child) {
+                        if ($child['name'] === '{'.Plugin::NS_CARDDAV.'}nresults') {
+                            $newProps['offset'] = (int) $child['value'];
                         }
                     }
                     break;
