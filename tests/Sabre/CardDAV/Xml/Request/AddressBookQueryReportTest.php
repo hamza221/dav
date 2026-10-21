@@ -330,4 +330,98 @@ XML;
             $result['value']
         );
     }
+
+    public function testDeserializeContinuationToken()
+    {
+        $xml = <<<XML
+<?xml version="1.0"?>
+<c:addressbook-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav" xmlns:s="http://sabredav.org/ns">
+    <d:prop>
+      <d:getetag />
+    </d:prop>
+    <c:limit><c:nresults> 25 </c:nresults></c:limit>
+    <s:continuation-token>card-b</s:continuation-token>
+</c:addressbook-query>
+XML;
+
+        $result = $this->parse($xml);
+        $addressBookQueryReport = new AddressBookQueryReport();
+        $addressBookQueryReport->properties = [
+            '{DAV:}getetag',
+        ];
+        $addressBookQueryReport->filters = [];
+        $addressBookQueryReport->test = 'anyof';
+        $addressBookQueryReport->limit = 25;
+        $addressBookQueryReport->continuationToken = 'card-b';
+
+        self::assertEquals(
+            $addressBookQueryReport,
+            $result['value']
+        );
+    }
+
+    public function testDeserializeNoContinuationToken()
+    {
+        $xml = <<<XML
+<?xml version="1.0"?>
+<c:addressbook-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav">
+    <d:prop>
+      <d:getetag />
+    </d:prop>
+    <c:limit><c:nresults>0</c:nresults></c:limit>
+</c:addressbook-query>
+XML;
+
+        $result = $this->parse($xml);
+
+        self::assertSame(0, $result['value']->limit);
+        self::assertNull($result['value']->continuationToken);
+    }
+
+    public function testDeserializeContinuationTokenWithChildren()
+    {
+        $this->expectException(\Sabre\DAV\Exception\BadRequest::class);
+        $xml = <<<XML
+<?xml version="1.0"?>
+<c:addressbook-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav" xmlns:s="http://sabredav.org/ns">
+    <d:prop>
+      <d:getetag />
+    </d:prop>
+    <s:continuation-token><s:foo>bar</s:foo></s:continuation-token>
+</c:addressbook-query>
+XML;
+
+        $this->parse($xml);
+    }
+
+    /**
+     * @dataProvider invalidNResultsProvider
+     */
+    public function testDeserializeInvalidNResults(string $nresults)
+    {
+        $this->expectException(\Sabre\DAV\Exception\BadRequest::class);
+        $xml = <<<XML
+<?xml version="1.0"?>
+<c:addressbook-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:carddav">
+    <d:prop>
+      <d:getetag />
+    </d:prop>
+    <c:limit>$nresults</c:limit>
+</c:addressbook-query>
+XML;
+
+        $this->parse($xml);
+    }
+
+    public function invalidNResultsProvider(): array
+    {
+        return [
+            'negative' => ['<c:nresults>-1</c:nresults>'],
+            'fraction' => ['<c:nresults>1.5</c:nresults>'],
+            'text' => ['<c:nresults>ten</c:nresults>'],
+            'empty' => ['<c:nresults></c:nresults>'],
+            'self-closing' => ['<c:nresults/>'],
+            'element' => ['<c:nresults><c:foo/></c:nresults>'],
+        ];
+    }
 }

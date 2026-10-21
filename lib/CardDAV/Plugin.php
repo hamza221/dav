@@ -96,7 +96,7 @@ class Plugin extends DAV\ServerPlugin
      */
     public function getFeatures(): array
     {
-        return ['addressbook'];
+        return ['addressbook', 'sabredav-addressbook-query-continuation'];
     }
 
     /**
@@ -379,25 +379,36 @@ class Plugin extends DAV\ServerPlugin
      * This report is used by the client to filter an addressbook based on a
      * complex query.
      *
+     * If the client limits the number of results and more matches exist, the
+     * result set is truncated as described in RFC 6352 section 8.6.2: a
+     * {DAV:}response for the Request-URI with status 507 is added, carrying a
+     * {DAV:}number-of-matches-within-limits error and a
+     * {http://sabredav.org/ns}continuation-token the client can send back to
+     * fetch the next page.
+     *
      * @param Xml\Request\AddressBookQueryReport $report
      */
     protected function addressbookQueryReport($report)
     {
         $depth = $this->server->getHTTPDepth(0);
+        $requestUri = $this->server->getRequestUri();
+        $limit = $report->limit ?: null;
+        $nextToken = null;
 
         if (0 == $depth) {
-            $candidateNodes = [
-                $this->server->tree->getNodeForPath($this->server->getRequestUri()),
-            ];
-            if (!$candidateNodes[0] instanceof ICard) {
+            $node = $this->server->tree->getNodeForPath($requestUri);
+            if (!$node instanceof ICard) {
                 throw new ReportNotSupported('The addressbook-query report is not supported on this url with Depth: 0');
             }
+            $validNodes = $this->filterCards([$node], $report, $limit);
         } else {
-            if($report->limit && $report->offset){
-             $candidateNodes = $this->server->tree->getChildren($this->server->getRequestUri(),$report->limit , $report->offset);
-            }
-            else{
-                $candidateNodes = $this->server->tree->getChildren($this->server->getRequestUri());
+            $collection = $this->server->tree->getNodeForPath($requestUri);
+            if ($collection instanceof IQueryableAddressBook) {
+                list($validNodes, $nextToken) = $this->queryAddressBook($collection, $requestUri, $report, $limit);
+            } elseif (null !== $limit || null !== $report->continuationToken) {
+                list($validNodes, $nextToken) = $this->queryChildrenByName($requestUri, $report, $limit);
+            } else {
+                $validNodes = $this->filterCards($this->server->tree->getChildren($requestUri), $report, null);
             }
         }
 
@@ -410,35 +421,12 @@ class Plugin extends DAV\ServerPlugin
             $contentType
         );
 
-        $validNodes = [];
-        foreach ($candidateNodes as $node) {
-            if (!$node instanceof ICard) {
-                continue;
-            }
-
-            $blob = $node->get();
-            if (is_resource($blob)) {
-                $blob = stream_get_contents($blob);
-            }
-
-            if (!$this->validateFilters($blob, $report->filters, $report->test)) {
-                continue;
-            }
-
-            $validNodes[] = $node;
-
-            if ($report->limit && $report->limit <= count($validNodes)) {
-                // We hit the maximum number of items, we can stop now.
-                break;
-            }
-        }
-
         $result = [];
         foreach ($validNodes as $validNode) {
             if (0 == $depth) {
-                $href = $this->server->getRequestUri();
+                $href = $requestUri;
             } else {
-                $href = $this->server->getRequestUri().'/'.$validNode->getName();
+                $href = $requestUri.'/'.$validNode->getName();
             }
 
             list($props) = $this->server->getPropertiesForPath($href, $report->properties, 0);
@@ -453,12 +441,201 @@ class Plugin extends DAV\ServerPlugin
             $result[] = $props;
         }
 
+        if (null !== $nextToken) {
+            $result[] = new DAV\Xml\Element\Response(
+                '' === $requestUri ? '' : $requestUri.'/',
+                [],
+                507,
+                [
+                    '{DAV:}error' => ['{DAV:}number-of-matches-within-limits' => null],
+                    '{'.DAV\Server::NS_SABREDAV.'}continuation-token' => $nextToken,
+                ]
+            );
+        }
+
         $prefer = $this->server->getHTTPPrefer();
 
         $this->server->httpResponse->setStatus(207);
         $this->server->httpResponse->setHeader('Content-Type', 'application/xml; charset=utf-8');
         $this->server->httpResponse->setHeader('Vary', 'Brief,Prefer');
         $this->server->httpResponse->setBody($this->server->generateMultiStatus($result, 'minimal' === $prefer['return']));
+    }
+
+    /**
+     * Returns the cards among $candidateNodes that match the report's filters,
+     * stopping after $limit matches.
+     *
+     * @param iterable<DAV\INode>                $candidateNodes
+     * @param Xml\Request\AddressBookQueryReport $report
+     *
+     * @return ICard[]
+     */
+    private function filterCards(iterable $candidateNodes, $report, ?int $limit): array
+    {
+        $validNodes = [];
+        foreach ($candidateNodes as $node) {
+            if (null !== $limit && count($validNodes) >= $limit) {
+                break;
+            }
+            if ($node instanceof ICard && $this->cardMatches($node, $report)) {
+                $validNodes[] = $node;
+            }
+        }
+
+        return $validNodes;
+    }
+
+    /**
+     * Lets an address book evaluate the query in its backend and re-validates
+     * the candidates it returns, in the order they were returned.
+     *
+     * Without a limit, all matches after the request's continuation token are
+     * returned. With a limit, candidates are requested in batches until
+     * $limit cards matched, no candidates are left, or the scan budget of
+     * max(10 * $limit, 500) examined candidates is exhausted. A truncated
+     * result continues after the last examined candidate.
+     *
+     * Candidates that no longer exist or are not accessible are skipped.
+     *
+     * @param Xml\Request\AddressBookQueryReport $report
+     *
+     * @return array{0: ICard[], 1: string|null} the matching cards and the continuation token, if the result was truncated
+     */
+    private function queryAddressBook(IQueryableAddressBook $addressBook, string $requestUri, $report, ?int $limit): array
+    {
+        $token = $report->continuationToken;
+        $validNodes = [];
+
+        if (null === $limit) {
+            $page = $addressBook->addressBookQuery($report->filters, $report->test, null, $token);
+            foreach ($this->loadCandidates($addressBook, $requestUri, $page['cards']) as $node) {
+                if (null !== $node && $this->cardMatches($node, $report)) {
+                    $validNodes[] = $node;
+                }
+            }
+
+            return [$validNodes, null];
+        }
+
+        $budget = max(10 * $limit, 500);
+        $examined = 0;
+        while (true) {
+            $remaining = $limit - count($validNodes);
+            $batchSize = min($report->filters ? max($remaining, 50) : $remaining, $budget - $examined);
+            $page = $addressBook->addressBookQuery($report->filters, $report->test, $batchSize, $token);
+            if (!$page['cards']) {
+                return [$validNodes, null];
+            }
+
+            $nodes = $this->loadCandidates($addressBook, $requestUri, $page['cards']);
+            foreach ($page['cards'] as $i => $card) {
+                if (count($validNodes) >= $limit || $examined >= $budget) {
+                    return [$validNodes, $token];
+                }
+                ++$examined;
+                $token = $card['continuationToken'];
+                if (null !== $nodes[$i] && $this->cardMatches($nodes[$i], $report)) {
+                    $validNodes[] = $nodes[$i];
+                }
+            }
+
+            if (!$page['hasMore']) {
+                return [$validNodes, null];
+            }
+            if (count($validNodes) >= $limit || $examined >= $budget) {
+                return [$validNodes, $token];
+            }
+        }
+    }
+
+    /**
+     * Loads the cards returned by IQueryableAddressBook::addressBookQuery.
+     *
+     * Cards are fetched in one go if the address book supports it.
+     *
+     * @param array<int, array{name: string, continuationToken: string}> $cards
+     *
+     * @return array<int, ICard|null> the nodes with the keys of $cards, null for cards that are missing or not accessible
+     */
+    private function loadCandidates(IQueryableAddressBook $addressBook, string $requestUri, array $cards): array
+    {
+        $paths = [];
+        foreach ($cards as $i => $card) {
+            $paths[$i] = $requestUri.'/'.$card['name'];
+        }
+
+        $nodes = [];
+        if ($addressBook instanceof DAV\IMultiGet) {
+            // Fetches all candidates through IMultiGet::getMultipleChildren
+            // and caches them in the tree for the property lookups.
+            $nodes = $paths ? $this->server->tree->getMultipleNodes(array_values($paths)) : [];
+        } else {
+            foreach ($paths as $path) {
+                try {
+                    $nodes[$path] = $this->server->tree->getNodeForPath($path);
+                } catch (DAV\Exception\NotFound|DAV\Exception\Forbidden $e) {
+                    continue;
+                }
+            }
+        }
+
+        $result = [];
+        foreach ($paths as $i => $path) {
+            $result[$i] = isset($nodes[$path]) && $nodes[$path] instanceof ICard ? $nodes[$path] : null;
+        }
+
+        return $result;
+    }
+
+    /**
+     * Evaluates the query over the children of a collection ordered by name,
+     * using the name of the last returned card as continuation token.
+     *
+     * @param Xml\Request\AddressBookQueryReport $report
+     *
+     * @return array{0: ICard[], 1: string|null} the matching cards and the continuation token, if the result was truncated
+     */
+    private function queryChildrenByName(string $requestUri, $report, ?int $limit): array
+    {
+        $cards = [];
+        foreach ($this->server->tree->getChildren($requestUri) as $node) {
+            if (!$node instanceof ICard) {
+                continue;
+            }
+            $name = $node->getName();
+            if (null === $report->continuationToken || strcmp($name, $report->continuationToken) > 0) {
+                $cards[$name] = $node;
+            }
+        }
+        uksort($cards, 'strcmp');
+
+        $validNodes = [];
+        foreach ($cards as $name => $node) {
+            if (!$this->cardMatches($node, $report)) {
+                continue;
+            }
+            if (null !== $limit && count($validNodes) >= $limit) {
+                return [$validNodes, end($validNodes)->getName()];
+            }
+            $validNodes[] = $node;
+        }
+
+        return [$validNodes, null];
+    }
+
+    /**
+     * Checks whether a card matches the report's filters.
+     *
+     * @param Xml\Request\AddressBookQueryReport $report
+     */
+    private function cardMatches(ICard $node, $report): bool
+    {
+        $blob = $node->get();
+        if (is_resource($blob)) {
+            $blob = stream_get_contents($blob);
+        }
+
+        return $this->validateFilters($blob, $report->filters, $report->test);
     }
 
     /**
@@ -790,7 +967,7 @@ class Plugin extends DAV\ServerPlugin
      *
      * @return string
      */
-    protected function convertVCard($data, $target, array $propertiesFilter = null)
+    protected function convertVCard($data, $target, ?array $propertiesFilter = null)
     {
         if (is_resource($data)) {
             $data = stream_get_contents($data);

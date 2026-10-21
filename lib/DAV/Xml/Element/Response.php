@@ -45,6 +45,14 @@ class Response implements Element
     protected $httpStatus;
 
     /**
+     * Child elements written after the status or propstat elements, keyed by
+     * clark-notation element name.
+     *
+     * @var array<string, mixed>
+     */
+    protected $additionalElements;
+
+    /**
      * The href argument is a url relative to the root of the server. This
      * class will calculate the full path.
      *
@@ -58,14 +66,23 @@ class Response implements Element
      * This is currently used by the Sync extension to indicate that a node is
      * deleted.
      *
-     * @param string $href
-     * @param string $httpStatus
+     * The additionalElements argument holds child elements that follow the
+     * status or propstat elements, such as {DAV:}error and
+     * {DAV:}responsedescription, or extension elements. Keys are element names
+     * in clark notation, values are serialized by the xml writer. They are
+     * written in the given order, so callers are responsible for the order
+     * required by RFC 4918 (error, responsedescription, location).
+     *
+     * @param string               $href
+     * @param string               $httpStatus
+     * @param array<string, mixed> $additionalElements
      */
-    public function __construct($href, array $responseProperties, $httpStatus = null)
+    public function __construct($href, array $responseProperties, $httpStatus = null, array $additionalElements = [])
     {
         $this->href = $href;
         $this->responseProperties = $responseProperties;
         $this->httpStatus = $httpStatus;
+        $this->additionalElements = $additionalElements;
     }
 
     /**
@@ -96,6 +113,16 @@ class Response implements Element
     public function getResponseProperties()
     {
         return $this->responseProperties;
+    }
+
+    /**
+     * Returns the child elements following the status or propstat elements.
+     *
+     * @return array<string, mixed>
+     */
+    public function getAdditionalElements()
+    {
+        return $this->additionalElements;
     }
 
     /**
@@ -158,6 +185,10 @@ class Response implements Element
                 ]);
             }
         }
+
+        if ($this->additionalElements) {
+            $writer->write($this->additionalElements);
+        }
     }
 
     /**
@@ -183,6 +214,7 @@ class Response implements Element
         $reader->pushContext();
 
         $reader->elementMap['{DAV:}propstat'] = Element\KeyValue::class;
+        $reader->elementMap['{DAV:}error'] = Element\KeyValue::class;
 
         // We are overriding the parser for {DAV:}prop. This deserializer is
         // almost identical to the one for Sabre\Xml\Element\KeyValue.
@@ -240,6 +272,7 @@ class Response implements Element
         $href = null;
         $propertyLists = [];
         $statusCode = null;
+        $additionalElements = [];
 
         foreach ($elems as $elem) {
             switch ($elem['name']) {
@@ -257,9 +290,12 @@ class Response implements Element
                 case '{DAV:}status':
                     list(, $statusCode) = explode(' ', $elem['value'], 3);
                     break;
+                default:
+                    $additionalElements[$elem['name']] = $elem['value'];
+                    break;
             }
         }
 
-        return new self($href, $propertyLists, $statusCode);
+        return new self($href, $propertyLists, $statusCode, $additionalElements);
     }
 }

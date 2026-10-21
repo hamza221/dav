@@ -391,4 +391,56 @@ class ResponseTest extends DAV\Xml\AbstractXmlTestCase
             $result['value']
         );
     }
+
+    public function testSerializeAdditionalElements()
+    {
+        $property = new Response('uri', [], 507, [
+            '{DAV:}error' => ['{DAV:}number-of-matches-within-limits' => null],
+            '{DAV:}responsedescription' => 'Too many matches',
+            '{http://sabredav.org/ns}continuation-token' => 'token',
+        ]);
+        $xml = $this->write(['{DAV:}root' => ['{DAV:}response' => $property]]);
+
+        self::assertXmlStringEqualsXmlString(
+            '<?xml version="1.0"?>
+<d:root xmlns:d="DAV:">
+  <d:response>
+    <d:href>/uri</d:href>
+    <d:status>HTTP/1.1 507 Insufficient Storage</d:status>
+    <d:error>
+      <d:number-of-matches-within-limits/>
+    </d:error>
+    <d:responsedescription>Too many matches</d:responsedescription>
+    <x1:continuation-token xmlns:x1="http://sabredav.org/ns">token</x1:continuation-token>
+  </d:response>
+</d:root>
+', $xml);
+    }
+
+    public function testDeserializeAdditionalElements()
+    {
+        $xml = '<?xml version="1.0"?>
+<d:response xmlns:d="DAV:" xmlns:s="http://sabredav.org/ns">
+  <d:href>/uri/</d:href>
+  <d:status>HTTP/1.1 507 Insufficient Storage</d:status>
+  <d:error>
+    <d:number-of-matches-within-limits/>
+  </d:error>
+  <d:responsedescription>Too many matches</d:responsedescription>
+  <s:continuation-token>token</s:continuation-token>
+</d:response>
+';
+
+        $result = $this->parse($xml, [
+            '{DAV:}response' => Response::class,
+        ]);
+        self::assertEquals(
+            new Response('/uri/', [], '507', [
+                '{DAV:}error' => ['{DAV:}number-of-matches-within-limits' => null],
+                '{DAV:}responsedescription' => 'Too many matches',
+                '{http://sabredav.org/ns}continuation-token' => 'token',
+            ]),
+            $result['value']
+        );
+    }
 }

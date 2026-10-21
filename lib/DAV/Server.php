@@ -1637,7 +1637,12 @@ class Server implements LoggerAwareInterface, EmitterInterface
     /**
      * Returns a callback generating a WebDAV propfind response body based on a list of nodes.
      *
-     * If 'strip404s' is set to true, all 404 responses will be removed.
+     * Every entry is either a property list as returned by getPropertiesForPath
+     * (with an 'href' key), or a prebuilt Xml\Element\Response which is written
+     * as is.
+     *
+     * If 'strip404s' is set to true, all 404 responses will be removed from
+     * property list entries.
      *
      * @param array|\Traversable $fileProperties The list with nodes
      * @param bool               $strip404s
@@ -1670,15 +1675,19 @@ class Server implements LoggerAwareInterface, EmitterInterface
         $w->startElement('{DAV:}multistatus');
 
         foreach ($fileProperties as $entry) {
-            $href = $entry['href'];
-            unset($entry['href']);
-            if ($strip404s) {
-                unset($entry[404]);
+            if ($entry instanceof Xml\Element\Response) {
+                $response = $entry;
+            } else {
+                $href = $entry['href'];
+                unset($entry['href']);
+                if ($strip404s) {
+                    unset($entry[404]);
+                }
+                $response = new Xml\Element\Response(
+                    ltrim($href, '/'),
+                    $entry
+                );
             }
-            $response = new Xml\Element\Response(
-                ltrim($href, '/'),
-                $entry
-            );
             $w->write([
                 'name' => '{DAV:}response',
                 'value' => $response,
