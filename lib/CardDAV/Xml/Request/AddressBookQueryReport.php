@@ -6,6 +6,7 @@ namespace Sabre\CardDAV\Xml\Request;
 
 use Sabre\CardDAV\Plugin;
 use Sabre\DAV\Exception\BadRequest;
+use Sabre\DAV\Server;
 use Sabre\Xml\Reader;
 use Sabre\Xml\XmlDeserializable;
 
@@ -75,6 +76,16 @@ class AddressBookQueryReport implements XmlDeserializable
     public $limit;
 
     /**
+     * Opaque token from a previous response's {http://sabredav.org/ns}continuation-token,
+     * telling the server where to continue a truncated result set.
+     *
+     * null means it wasn't specified, which means 'from the start'.
+     *
+     * @var string|null
+     */
+    public $continuationToken;
+
+    /**
      * Either 'anyof' or 'allof'.
      *
      * @var string
@@ -129,6 +140,7 @@ class AddressBookQueryReport implements XmlDeserializable
             'properties' => [],
             'test' => 'anyof',
             'limit' => null,
+            'continuationToken' => null,
         ];
 
         if (!is_array($elems)) {
@@ -162,11 +174,21 @@ class AddressBookQueryReport implements XmlDeserializable
                     }
                     break;
                 case '{'.Plugin::NS_CARDDAV.'}limit':
-                    foreach ($elem['value'] as $child) {
+                    foreach ((array) $elem['value'] as $child) {
                         if ($child['name'] === '{'.Plugin::NS_CARDDAV.'}nresults') {
-                            $newProps['limit'] = (int) $child['value'];
+                            $nresults = is_string($child['value']) ? trim($child['value']) : null;
+                            if (null === $nresults || !ctype_digit($nresults)) {
+                                throw new BadRequest('The {'.Plugin::NS_CARDDAV.'}nresults element must contain an unsigned integer');
+                            }
+                            $newProps['limit'] = (int) $nresults;
                         }
                     }
+                    break;
+                case '{'.Server::NS_SABREDAV.'}continuation-token':
+                    if (is_array($elem['value'])) {
+                        throw new BadRequest('The {'.Server::NS_SABREDAV.'}continuation-token element must only contain text');
+                    }
+                    $newProps['continuationToken'] = (string) $elem['value'];
                     break;
             }
         }

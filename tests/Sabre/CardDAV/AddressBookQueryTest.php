@@ -182,7 +182,15 @@ class AddressBookQueryTest extends AbstractPluginTestCase
                     '{DAV:}getetag' => '"'.md5("BEGIN:VCARD\nVERSION:3.0\nUID:12345\nEND:VCARD").'"',
                 ],
             ],
+            '/addressbooks/user1/book1/' => [],
         ], $result);
+
+        $truncation = $this->server->xml->expect('{DAV:}multistatus', $bodyAsString)->getResponses()[1];
+        self::assertEquals('507', $truncation->getHttpStatus());
+        self::assertEquals([
+            '{DAV:}error' => ['{DAV:}number-of-matches-within-limits' => null],
+            '{http://sabredav.org/ns}continuation-token' => 'card1',
+        ], $truncation->getAdditionalElements());
     }
 
     public function testJson()
